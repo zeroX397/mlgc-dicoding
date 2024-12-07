@@ -2,7 +2,7 @@ const express = require("express");
 const multer = require("multer");
 const { v4: uuidv4 } = require("uuid");
 const moment = require("moment");
-const tf = require("@tensorflow/tfjs-node");
+const tf = require("@tensorflow/tfjs");
 const { Storage } = require("@google-cloud/storage");
 const { Firestore } = require("@google-cloud/firestore");
 const sharp = require("sharp");
@@ -15,7 +15,7 @@ const app = express();
 // Google Cloud Storage setup
 const storage = new Storage();
 const bucketName = "submissionmlgc-christopher";
-const modelPath = "https://storage.googleapis.com/submissionmlgc-christopher/submissions-model/model.json";
+const modelPath = "submissions-model/model.json";
 let model;
 
 // Firestore setup
@@ -23,7 +23,7 @@ const firestore = new Firestore();
 const collectionName = "prediction_histories"; // Firestore collection
 
 // Configure multer for file upload
-const upload = multer({
+const upload = multer({ 
     limits: { fileSize: 1000000 }, // Max size: 1MB
     fileFilter(req, file, cb) {
         if (!file.mimetype.startsWith("image/")) {
@@ -36,10 +36,18 @@ const upload = multer({
 // Load model from Cloud Storage
 async function loadModel() {
     const bucket = storage.bucket(bucketName);
-    const [file] = await bucket.file(modelPath).download();
-    model = await tf.loadLayersModel(tf.io.fromMemory(file.toString()));
+    const file = bucket.file(modelPath);
+  
+    const [exists] = await file.exists();
+    if (!exists) {
+      throw new Error(`File ${modelPath} does not exist in bucket ${bucketName}`);
+    }
+  
+    const [fileData] = await file.download();
+    model = await tf.loadLayersModel(tf.io.fromMemory(fileData.toString()));
     console.log("Model loaded successfully");
-}
+  }
+  
 
 // Prediction function
 async function predictCancer(imageBuffer) {
