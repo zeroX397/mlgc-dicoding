@@ -2,28 +2,31 @@ const express = require("express");
 const multer = require("multer");
 const { v4: uuidv4 } = require("uuid");
 const moment = require("moment");
-const tf = require("@tensorflow/tfjs");
+const tf = require("@tensorflow/tfjs-node");
 const { Storage } = require("@google-cloud/storage");
 const { Firestore } = require("@google-cloud/firestore");
 const sharp = require("sharp");
+const admin = require("firebase-admin");
 
-const port = 3000;
+const port = 8080;
 
 const app = express();
-// const port = process.env.PORT || 8080;
-
-// Google Cloud Storage setup
-const storage = new Storage();
-const bucketName = "submissionmlgc-christopher";
-const modelPath = "submissions-model/model.json";
-let model;
 
 // Firestore setup
-const firestore = new Firestore();
-const collectionName = "prediction_histories"; // Firestore collection
+const firestore = new Firestore({
+    projectId: "submissionmlgc-christopher",
+});
+
+// Initialize Firebase Admin SDK
+admin.initializeApp({
+    credential: admin.credential.cert(require("./firebase-serviceAccount.json")), // please replace with your firebase admin account
+});
+
+const db = admin.firestore();
+const collectionName = "predictions"; // Firestore collection
 
 // Configure multer for file upload
-const upload = multer({ 
+const upload = multer({
     limits: { fileSize: 1000000 }, // Max size: 1MB
     fileFilter(req, file, cb) {
         if (!file.mimetype.startsWith("image/")) {
@@ -35,26 +38,30 @@ const upload = multer({
 
 // Load model from Cloud Storage
 async function loadModel() {
-    const bucket = storage.bucket(bucketName);
-    const file = bucket.file(modelPath);
-  
-    const [exists] = await file.exists();
-    if (!exists) {
-      throw new Error(`File ${modelPath} does not exist in bucket ${bucketName}`);
+    try {
+        console.log("Model loaded successfully.");
+        return tf.loadGraphModel('https://storage.googleapis.com/submissionmlgc-christopher/submissions-model/model.json');
     }
-  
-    const [fileData] = await file.download();
-    model = await tf.loadLayersModel(tf.io.fromMemory(fileData.toString()));
-    console.log("Model loaded successfully");
-  }
-  
+    catch {
+        console.error("Error loading model:", error);
+        throw error;
+    }
+}
 
 // Prediction function
-async function predictCancer(imageBuffer) {
-    const imageTensor = tf.node.decodeImage(imageBuffer, 3); // Decode RGB image
-    const resizedImage = tf.image.resizeBilinear(imageTensor, [224, 224]); // Resize to 224x224
-    const input = resizedImage.expandDims(0).div(255.0); // Normalize
-    const prediction = model.predict(input).dataSync(); // Perform prediction
+async function predictCancer(image) {
+    const model = await loadModel();
+    console.log(image);
+    let imgTensor = tf.node.decodeImage(image);
+    if (imgTensor.shape[2] === 4) {
+        imgTensor = imgTensor.slice([0, 0, 0], [-1, -1, 3]);
+    }
+    imgTensor = imgTensor
+        .resizeNearestNeighbor([224, 224])
+        .expandDims()
+        .toFloat();
+
+    const prediction = model.predict(imgTensor).dataSync(); // Perform prediction
 
     // Classify based on prediction
     const result = prediction[0] > 0.5 ? "Cancer" : "Non-cancer";
@@ -63,17 +70,16 @@ async function predictCancer(imageBuffer) {
 
 // Store prediction in Firestore
 async function storePrediction(id, result, createdAt, suggestion) {
-    const history = {
-        id,
-        result,
-        createdAt,
-        suggestion,
-    };
-    await firestore.collection(collectionName).doc(id).set({ history });
+    const docRef = db.collection(collectionName).doc(id);
+    const data = { id, result, suggestion, createdAt };
+
+    await docRef.set(data); // Save data to Firestore
+    console.log(`Prediction with id ${id} saved to Firestore.`);
 }
 
 // Endpoint: Predict
 app.post("/predict", upload.single("image"), async (req, res) => {
+    console.log(req.file);
     try {
         if (!req.file) {
             return res.status(400).json({
@@ -86,7 +92,7 @@ app.post("/predict", upload.single("image"), async (req, res) => {
             .resize(224, 224)
             .toBuffer();
 
-        const predictionResult = await predictCancer(imageBuffer);
+        const predictionResult = await predictCancer(req.file.buffer);
 
         const id = uuidv4();
         const createdAt = moment().toISOString();
@@ -95,8 +101,10 @@ app.post("/predict", upload.single("image"), async (req, res) => {
             predictionResult === "Cancer"
                 ? "Segera periksa ke dokter!"
                 : "Anda sehat!";
-
+        console.log(id, predictionResult, createdAt, suggestion);
         await storePrediction(id, predictionResult, createdAt, suggestion);
+
+        console.log(predictionResult);
 
         res.status(200).json({
             status: "success",
